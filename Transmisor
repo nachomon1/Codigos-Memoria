@@ -1,0 +1,161 @@
+import numpy as np
+from scipy.integrate import quad
+from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import cpu_count
+from tqdm import tqdm
+import time
+from PIL import Image
+import matplotlib.pyplot as plt
+
+start_time = time.time()
+
+#-------------------TRANSMISOR-----------------------#
+
+# Leer la imagen
+image = Image.open('imagen_linda.jpg')
+
+# Convertir la imagen a un array de numpy
+image_array = np.array(image)
+
+# Verificar las dimensiones de la imagen
+print(f"Dimensiones de la imagen: {image_array.shape}")
+
+# Descomponer en las tres matrices de colores
+red_channel = image_array[:, :, 0]
+green_channel = image_array[:, :, 1]
+blue_channel = image_array[:, :, 2]
+
+# Asegurarse de que las dimensiones son correctas
+assert red_channel.shape == (108, 192)
+assert green_channel.shape == (108, 192)
+assert blue_channel.shape == (108, 192)
+
+# Convertir cada canal de color (0-255) directamente a bits (sin bucle)
+red_bits = np.unpackbits(red_channel.flatten())
+green_bits = np.unpackbits(green_channel.flatten())
+blue_bits = np.unpackbits(blue_channel.flatten())
+
+# Concatenar los arrays de bits en un solo vector 1D
+concatenated_bits = np.concatenate((red_bits, green_bits, blue_bits))
+
+# Ejemplo: Imprimir los primeros 80 bits para verificar
+print("Concatenated bits (first 80 bits):", concatenated_bits[:80])
+
+data = concatenated_bits.flatten()
+
+
+#-------------------Modulacion-----------------------#
+
+# Generar datos
+largo_data = len(data)  # Ajustar el tamaño de datos según sea necesario 10%=497664
+A = 1
+f_c = 100  # Frecuencia máxima de un Arduino Uno para generar funciones cuadradas
+omega_c = 2 * np.pi * f_c
+T_muestreo = 1e-5 # Periodo mínimo de parpadeo de un led blanco
+interval_step = T_muestreo
+f0 = 100  # Frecuencia máxima de un Arduino Uno para generar funciones cuadradas
+omega = 2 * np.pi * f0
+
+# Crear el vector de tiempo
+t = np.arange(0, largo_data * T_muestreo, T_muestreo)
+print(t)
+
+# Calcular la función cos(omega t)
+cos_omega_t = A * np.cos(omega * t)
+
+# Multiplicar el array de números aleatorios por la función cos(omega t)
+result_array = data * cos_omega_t
+
+total_duration = largo_data * T_muestreo
+
+# Crear el vector de tiempo desde 0 hasta total_duration con incrementos de interval_step
+time_vector = np.arange(0, total_duration, interval_step)
+
+# Precalcular los valores de cos(omega * t) para ahorrar cálculos repetidos
+cos_omega_time_vector = A * np.cos(omega * time_vector)
+
+# Definir la función f(t)
+def f(index, data):
+    if data[index] == 0:
+        return 0
+    else:
+        return cos_omega_time_vector[index]
+    
+    
+# Duración de cada bit en muestras
+samples_per_bit = len(time_vector) // largo_data
+
+# Preasignar el vector de modulación para calzar con el time_vector
+modulation = np.repeat(data, samples_per_bit)
+
+# Si el tamaño de time_vector no es múltiplo exacto de largo_data, recortar o ajustar modulation
+modulation = modulation[:len(time_vector)]  # Aseguramos que tenga el mismo tamaño que time_vector
+
+# Señal portadora
+carrier = A * np.cos(omega * time_vector)
+
+# Señal modulada en amplitud: data binaria * cos(w_c t)
+modulated_signal = modulation * carrier
+
+# Graficar la señal modulada
+plt.figure(figsize=(10, 4))
+plt.plot(time_vector, modulated_signal, color='k')
+plt.title(r'$data(t) \cdot \cos(\omega_c t)$ - Modulación OOK con datos binarios')
+plt.xlabel('Tiempo (s)')
+plt.ylabel('Amplitud')
+plt.grid(True)
+plt.show()
+#---------------------Potencia----------------------#
+
+
+# Función para calcular la potencia en un intervalo usando la función quad
+def calcular_potencia(index, data):
+    if data[index] == 0:
+        return 0
+    else:
+        def integrand(x):
+            return A * np.cos(omega * x) ** 2
+
+        t = time_vector[index]
+        integral_result, _ = quad(integrand, t - interval_step / 2, t + interval_step / 2)
+        power = (1 / interval_step) * integral_result
+        return round(power, 3)
+
+# Función wrapper para pasar los argumentos necesarios a calcular_potencia
+def calcular_potencia_wrapper(index):
+    return calcular_potencia(index, data)
+
+# Preparar los índices para el cálculo paralelo
+indices = np.arange(len(time_vector))
+
+
+#-----------Paralelización---------------------#
+
+# Paralelizar el cálculo de la potencia
+power_vector = []
+if __name__ == '__main__':
+    with ThreadPoolExecutor(max_workers=cpu_count()) as executor:
+        power_vector = list(tqdm(executor.map(calcular_potencia_wrapper, indices), total=len(indices)))
+
+    # Convertir la lista de potencias a un array de numpy
+    power_vector = np.array(power_vector)
+
+    print(f"Vector de data d: {data[:10]}")
+    print(f"Vector de data modulada: {result_array[:10]}")
+    print(f"Vector de potencia P: {power_vector[:10]}")
+
+    print(f"Tamaño de time_vector: {len(time_vector)}")
+    print(f"Tamaño de power_vector: {len(power_vector)}")
+    print(f"Tamaño de data: {len(data)}")
+    print(f"Tamaño de result_array: {len(result_array)}")
+
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f"Tiempo de ejecución: {execution_time} segundos")
+    
+#------------------Generaciondedocumentos-------------------#
+
+    # Guardar los vectores en archivos CSV
+    np.savetxt('data.csv', data, delimiter=',')
+    np.savetxt('result_array.csv', result_array, delimiter=',')
+    np.savetxt('power_vector.csv', power_vector, delimiter=',')
